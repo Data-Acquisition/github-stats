@@ -1,8 +1,24 @@
 import requests
+from pydantic import BaseModel
+from typing import Optional
 
 # Constants
 GITHUB_API_URL = "https://api.github.com"
 ACCESS_TOKEN = ""
+
+
+class Repo(BaseModel):
+    name: str
+    total_commits: int = 0
+
+
+class Commit(BaseModel):
+    sha: str
+    author: str
+    date: str
+    additions: int
+    deletions: int
+    message: Optional[str]
 
 
 def get_org_repos(org_name):
@@ -17,11 +33,12 @@ def get_org_repos(org_name):
         try:
             response.raise_for_status()
             page_repos = response.json()
-            if page_repos:
-                repos.extend(page_repos)
-                page += 1
-            else:
+            if not page_repos:
                 break
+            print(f"Page {page} contains {len(page_repos)} repos")
+            for repo in page_repos:
+                repos.append(Repo(name=repo['name']))
+            page += 1
         except requests.exceptions.HTTPError as e:
             print(f"Error fetching repositories: {e}")
             break
@@ -29,7 +46,8 @@ def get_org_repos(org_name):
     return repos
 
 
-def get_repo_commit_info(org_name, repo_name):
+def get_repo_commit_info(org_name, repo):
+    repo_name = repo.name
     commits_info = []
     headers = {'Authorization': f'token {ACCESS_TOKEN}'}
     repo_url = f"{GITHUB_API_URL}/repos/{org_name}/{repo_name}"
@@ -85,17 +103,14 @@ def get_repo_commit_info(org_name, repo_name):
     return commits_info
 
 
-org_name = "Data-Acquisition"
-repos = get_org_repos(org_name)
-print(f"Total repositories in organization: {len(repos)}")
+def main():
+    org_name = "Data-Acquisition"
+    print(f"Getting repos for {org_name}")
+    repos = get_org_repos(org_name)
 
-for repo in repos:
-    repo_name = repo['name']
-    commits_info = get_repo_commit_info(org_name, repo_name)
-    print(f"\nRepository: {repo_name}, Total Commits: {len(commits_info)}")
-    for commit in commits_info:
-        print(f"- Commit {commit['sha']}:")
-        print(f"  Author: {commit['author']}")
-        print(f"  Date: {commit['date']}")
-        print(f"  Additions: {commit['additions']}, Deletions: {commit['deletions']}")
-        print(f"  Message: {commit['message']}\n")
+    for repo in repos:
+        print(repo)
+
+
+if __name__ == "__main__":
+    main()
