@@ -1,13 +1,14 @@
 import requests
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import psycopg2
 import os
 
 # Constants
 GITHUB_API_URL = "https://api.github.com"
 ACCESS_TOKEN = ""
+UPDATE_ONLY = os.getenv('UPDATE_ONLY', 'false').lower() == 'true'
 
 
 class Repo(BaseModel):
@@ -40,7 +41,7 @@ def get_org_repos(org_name):
                 break
             print(f"Page {page} contains {len(page_repos)} repos")
             for repo in page_repos:
-                repos.append(Repo(name=repo['name']))
+                repos.append(Repo(name=repo['name'], total_commits=0))
             page += 1
         except requests.exceptions.HTTPError as e:
             print(f"Error fetching repositories: {e}")
@@ -69,9 +70,13 @@ def get_repo_commit_info(org_name, repo):
     page = 1
     per_page = 100
     commits_info = []
+    since = (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z" if UPDATE_ONLY else None
 
     while True:
-        url = f"{GITHUB_API_URL}/repos/{org_name}/{repo_name}/commits?per_page={per_page}&page={page}&sha={default_branch}"
+        if since:
+            url = f"{GITHUB_API_URL}/repos/{org_name}/{repo_name}/commits?per_page={per_page}&page={page}&sha={default_branch}&since={since}"
+        else:
+            url = f"{GITHUB_API_URL}/repos/{org_name}/{repo_name}/commits?per_page={per_page}&page={page}&sha={default_branch}"
         response = requests.get(url, headers=headers)
         try:
             response.raise_for_status()
@@ -148,30 +153,39 @@ def make_migrations(conn):
     cur.close()
 
 
-def insert_into_postgres(conn, repos_data, commits_data):
+def insert_into_postgres(conn, repos, commits_data):
     cur = conn.cursor()
 
-    for repo in repos_data:
+    for repo in repos:
+        if UPDATE_ONLY:
+            # Update only mode: Fetch existing total commits count from the DB
+            cur.execute("SELECT total_commits FROM repos WHERE name=%s", (repo.name,))
+            result = cur.fetchone()
+            total_commits = repo.total_commits + result[0] if result else repo.total_commits
+        else:
+            total_commits = repo.total_commits
+
         cur.execute("""
             INSERT INTO repos (name, total_commits)
             VALUES (%s, %s)
-            ON CONFLICT (name) DO NOTHING
+            ON CONFLICT (name) DO UPDATE SET
+                total_commits = EXCLUDED.total_commits
             RETURNING id;
-        """, (repo['name'], repo['total_commits']))
+            """, (repo.name, total_commits))
         repo_id = cur.fetchone()[0]
 
-        for commit in commits_data.get(repo['name'], []):
+        for commit in commits_data.get(repo.name, []):
             cur.execute("""
                 INSERT INTO commits (sha, author, date, additions, deletions, message, repo_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (sha) DO NOTHING;
-            """, (
-                commit['sha'],
-                commit['author'],
-                commit['date'],
-                commit['additions'],
-                commit['deletions'],
-                commit['message'],
+                """, (
+                commit.sha,
+                commit.author,
+                commit.date,
+                commit.additions,
+                commit.deletions,
+                commit.message,
                 repo_id
             ))
 
@@ -182,13 +196,13 @@ def insert_into_postgres(conn, repos_data, commits_data):
 def main():
     org_name = "Data-Acquisition"
 
-    # print("Connecting to Postgres...")
-    # conn = psycopg2.connect(user=os.environ["POSTGRES_USER"], password=os.environ["POSTGRES_PASSWORD"],
-    #                         database=os.environ["POSTGRES_DATABASE"], host=os.environ["POSTGRES_HOST"],
-    #                         port=os.environ["POSTGRES_PORT"])
-    #
-    # print("Running migrations...")
-    # make_migrations(conn)
+    print("Connecting to Postgres...")
+    conn = psycopg2.connect(user=os.environ["POSTGRES_USER"], password=os.environ["POSTGRES_PASSWORD"],
+                            database=os.environ["POSTGRES_DATABASE"], host=os.environ["POSTGRES_HOST"],
+                            port=os.environ["POSTGRES_PORT"])
+
+    print("Running migrations...")
+    make_migrations(conn)
 
     print(f"Getting repos for {org_name}")
     repos = get_org_repos(org_name)
@@ -204,6 +218,10 @@ def main():
 
         print(f"{repo.name} has {repo.total_commits} commits")
         print(commits)
+
+    insert_into_postgres(conn, repos, all_commits_data)
+
+    conn.close()
 
 
 if __name__ == "__main__":
